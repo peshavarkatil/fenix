@@ -105,28 +105,40 @@ def steps(raw: Json) -> dict[str, dict[str, Any]]:
     return out
 
 
+def _p(r: Json, *path: str) -> float | None:
+    """A number at an exact nested path, e.g. _p(r, "heartRate", "restingValue")."""
+    cur: Json = r
+    for key in path:
+        if not isinstance(cur, dict):
+            return None
+        cur = cur.get(key)
+    return num(cur)
+
+
 def daily_summaries(raw: Json) -> dict[str, dict[str, Any]]:
+    """Garmin's daily summary is nested (movement.steps.value, heartRate.restingValue, ...).
+    The flat names are kept as a fallback in case Garmin changes shape."""
     out = {}
     for r in records(raw):
         d = day_of(r)
         if not d:
             continue
+        moderate = _p(r, "intensityMinutes", "moderate")
+        vigorous = _p(r, "intensityMinutes", "vigorous")
         out[d] = {
-            "steps": first_num(r, "totalSteps"),
-            "step_goal": first_num(r, "dailyStepGoal", "stepGoal"),
-            "distance_m": first_num(r, "totalDistanceMeters", "totalDistance"),
-            "rhr": first_num(r, "restingHeartRate"),
-            "hr_min": first_num(r, "minHeartRate"),
-            "hr_max": first_num(r, "maxHeartRate"),
-            "bb_high": first_num(r, "bodyBatteryHighestValue", "bodyBatteryMostRecentValue"),
-            "bb_low": first_num(r, "bodyBatteryLowestValue"),
-            "active_kcal": first_num(r, "activeKilocalories"),
-            "total_kcal": first_num(r, "totalKilocalories"),
-            "stress_avg": first_num(r, "averageStressLevel"),
-            "intensity_min": _sum(
-                first_num(r, "moderateIntensityMinutes"), first_num(r, "vigorousIntensityMinutes", )
-            ),
-            "floors": first_num(r, "floorsAscended"),
+            "steps": _p(r, "movement", "steps", "value") if _p(r, "movement", "steps", "value") is not None else first_num(r, "totalSteps"),
+            "step_goal": _p(r, "movement", "steps", "goal") if _p(r, "movement", "steps", "goal") is not None else first_num(r, "dailyStepGoal", "stepGoal"),
+            "distance_m": _p(r, "movement", "steps", "distanceInMeters") if _p(r, "movement", "steps", "distanceInMeters") is not None else first_num(r, "totalDistanceMeters"),
+            "floors": _p(r, "movement", "floorsAscended", "value"),
+            "rhr": _p(r, "heartRate", "restingValue") if _p(r, "heartRate", "restingValue") is not None else first_num(r, "restingHeartRate"),
+            "hr_min": _p(r, "heartRate", "minValue"),
+            "hr_max": _p(r, "heartRate", "maxValue"),
+            "active_kcal": _p(r, "calories", "burnedActive") if _p(r, "calories", "burnedActive") is not None else first_num(r, "activeKilocalories"),
+            "total_kcal": _p(r, "calories", "burnedTotal") if _p(r, "calories", "burnedTotal") is not None else first_num(r, "totalKilocalories"),
+            "stress_avg": _p(r, "stress", "avgLevel") if _p(r, "stress", "avgLevel") is not None else first_num(r, "averageStressLevel"),
+            # Garmin counts vigorous minutes double toward its intensity-minutes total.
+            "intensity_min": (moderate or 0) + 2 * (vigorous or 0) if (moderate is not None or vigorous is not None) else None,
+            "resp_avg": _p(r, "respiration", "avgValue"),
         }
     return out
 
@@ -276,4 +288,3 @@ NORMALIZERS = {
     "sleep": sleep,
     "body_battery": body_battery,
 }
-
