@@ -1,0 +1,81 @@
+# Fetches your Garmin data every 3 hours, locks it with your passphrase,
+# and publishes it (plus the phone app) to your GitHub Pages site.
+name: Refresh Garmin data
+
+on:
+  schedule:
+    - cron: "17 */3 * * *"
+  workflow_dispatch:
+    inputs:
+      check_only:
+        description: "Only check the connection to Garmin (publishes nothing)"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+  actions: write
+
+concurrency:
+  group: fenix-refresh
+  cancel-in-progress: false
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    env:
+      GARMIN_PERSONAL_API_KEY: ${{ secrets.GARMIN_PERSONAL_API_KEY }}
+      FENIX_PASSPHRASE: ${{ secrets.FENIX_PASSPHRASE }}
+      FENIX_TIMEZONE: ${{ vars.FENIX_TIMEZONE }}
+      FENIX_RESET: ${{ vars.FENIX_RESET }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - run: pip install -r requirements.txt
+
+      - name: Check the connection to Garmin
+        if: ${{ inputs.check_only }}
+        run: python -m garmin_dash probe
+
+      - name: Get the data published last time
+        if: ${{ !inputs.check_only }}
+        run: |
+          owner="${GITHUB_REPOSITORY_OWNER,,}"; repo="${GITHUB_REPOSITORY#*/}"
+          code=$(curl -sS -o previous.bin -w '%{http_code}' "https://${owner}.github.io/${repo}/data.bin?t=$(date +%s)" || echo 000)
+          if [ "$code" = "200" ]; then echo "Found previous data."
+          elif [ "$code" = "404" ]; then echo "No previous data yet (first run)."; rm -f previous.bin
+          else echo "::error::Could not read the previous data (HTTP $code). Stopping so your history isn't lost. Re-run in a few minutes."; exit 1; fi
+
+      - name: Download from Garmin, lock, and build the site
+        if: ${{ !inputs.check_only }}
+        run: |
+          python -m garmin_dash publish --out site --previous previous.bin
+          cp -r web/. site/
+
+      - uses: actions/upload-pages-artifact@v5
+        if: ${{ !inputs.check_only }}
+        with:
+          path: site
+
+      - id: deploy
+        if: ${{ !inputs.check_only }}
+        uses: actions/deploy-pages@v5
+
+      # GitHub pauses scheduled jobs on quiet public repos after 60 days. Best effort to prevent that.
+      - name: Keep the schedule switched on
+        if: ${{ !inputs.check_only }}
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh api -X PUT "repos/${GITHUB_REPOSITORY}/actions/workflows/refresh.yml/enable"
